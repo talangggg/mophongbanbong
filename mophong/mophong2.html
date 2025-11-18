@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Mô phỏng Quỹ đạo (Solver)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            background-color: #f0f0f0;
+            padding: 20px;
+        }
+        #ui-container {
+            display: flex;
+            gap: 20px;
+            width: 1000px;
+        }
+        #controls {
+            flex-basis: 250px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        #controls div {
+            margin-bottom: 15px;
+        }
+        #controls label {
+            font-size: 14px;
+            color: #555;
+            display: block;
+            margin-bottom: 5px;
+        }
+        /* Đổi input thành "readonly" vì chúng là KẾT QUẢ */
+        #controls input {
+            width: calc(100% - 20px);
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+            background-color: #eee; /* Màu xám để biết là readonly */
+        }
+        #status {
+            font-size: 1.1em;
+            font-weight: bold;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        #status.in { background-color: #d4edda; color: #155724; }
+        #status.net { background-color: #fff3cd; color: #856404; }
+        #status.out { background-color: #f8d7da; color: #721c24; }
+        #status.impossible { background-color: #aaa; color: #fff; }
+
+        canvas {
+            background-color: #ffffff;
+            border: 1px solid #000;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Mô phỏng Quỹ đạo Tương tác</h1>
+
+    <div id="ui-container">
+        <div id="controls">
+            <div>
+                <label for="H0">Độ cao máy (H₀)</label>
+                <input type="text" id="H0" readonly>
+            </div>
+            <div>
+                <label for="x1">Tầm xa (x₁)</label>
+                <input type="text" id="x1" readonly>
+            </div>
+            <div>
+                <label for="v0">Vận tốc (v₀)</label>
+                <input type="text" id="v0" readonly>
+            </div>
+            <div>
+                <label for="theta">Góc bắn (θ)</label>
+                <input type="text" id="theta" readonly>
+            </div>
+            <div id="status">---</div>
+        </div>
+
+        <canvas id="simCanvas" width="750" height="500"></canvas>
+    </div>
+
+    <script>
+        // === 1. LẤY CÁC ĐỐI TƯỢNG HTML ===
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Các ô hiển thị kết quả
+        const inputH0 = document.getElementById('H0');
+        const inputX1 = document.getElementById('x1');
+        const inputV0 = document.getElementById('v0');
+        const inputTheta = document.getElementById('theta');
+        const statusEl = document.getElementById('status');
+
+        // === 2. THIẾT LẬP HẰNG SỐ CỦA MÔ PHỎNG ===
+        const g = 9.8;
+        const L = 13.41;
+        const h_luoi = 0.8636;
+        const x_luoi = L / 2;
+
+        // Cài đặt đồ họa: Tỉ lệ (pixels / mét) và Gốc tọa độ
+        const SCALE = 45; // 45 pixels cho mỗi mét
+        const ORIGIN_X = 50; // Gốc x=0 cách lề trái 50px
+        const ORIGIN_Y = 400; // Gốc y=0 cách lề trên 400px
+
+        // === 3. TRẠNG THÁI TƯƠNG TÁC ===
+        // 3 điểm điều khiển (tính bằng mét)
+        let handles = {
+            P0: { x: 0, y: 1.0 },    // Điểm bắn
+            P1: { x: 10.0, y: 0 },   // Điểm rơi
+            Apex: { x: 5.0, y: 3.0 } // Đỉnh
+        };
+        const handleRadius = 8; // Bán kính (px) để bấm
+        let isDragging = null; // Tên của handle đang được kéo
+
+        // === 4. HÀM CHUYỂN ĐỔI TỌA ĐỘ ===
+        
+        // Từ mét (Vật lý) sang Pixel (Canvas)
+        function m2p(x_m, y_m) {
+            return {
+                x_px: ORIGIN_X + x_m * SCALE,
+                y_px: ORIGIN_Y - y_m * SCALE 
+            };
+        }
+        
+        // Từ Pixel (Canvas) sang Mét (Vật lý)
+        function p2m(x_px, y_px) {
+            return {
+                x_m: (x_px - ORIGIN_X) / SCALE,
+                y_m: (ORIGIN_Y - y_px) / SCALE
+            };
+        }
+
+        // === 5. HÀM VẼ ===
+
+        // (Cải thiện) Hàm vẽ Sân đấu, Lưới và các Đơn vị
+        function drawScene() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#aaa';
+
+            // --- Vẽ Lưới tọa độ và Đơn vị ---
+            ctx.font = '10px Arial';
+            ctx.fillStyle = '#aaa';
+            
+            // Trục Ox (Đánh dấu mỗi 2m)
+            for (let x = 0; x < 20; x += 2) {
+                const pos = m2p(x, 0);
+                ctx.beginPath();
+                ctx.moveTo(pos.x_px, pos.y_px);
+                ctx.lineTo(pos.x_px, pos.y_px - 5);
+                ctx.stroke();
+                ctx.fillText(`${x}m`, pos.x_px - 5, pos.y_px + 15);
+            }
+            
+            // Trục Oy (Đánh dấu mỗi 1m)
+            for (let y = 0; y < 10; y += 1) {
+                const pos = m2p(0, y);
+                ctx.beginPath();
+                ctx.moveTo(pos.x_px, pos.y_px);
+                ctx.lineTo(pos.x_px + 5, pos.y_px);
+                ctx.stroke();
+                ctx.fillText(`${y}m`, pos.x_px - 20, pos.y_px + 3);
+            }
+            
+            // Vẽ trục Ox, Oy đậm hơn
+            ctx.strokeStyle = '#000';
+            ctx.beginPath();
+            ctx.moveTo(m2p(0, 0).x_px, m2p(0, 0).y_px);
+            ctx.lineTo(m2p(16, 0).x_px, m2p(16, 0).y_px); // Trục Ox
+            ctx.moveTo(m2p(0, 0).x_px, m2p(0, 0).y_px);
+            ctx.lineTo(m2p(0, 8).x_px, m2p(0, 8).y_px); // Trục Oy
+            ctx.stroke();
+
+
+            // --- Vẽ Sân (L) và Lưới (h_luoi) ---
+            ctx.strokeStyle = 'blue';
+            ctx.lineWidth = 2;
+            
+            // Vạch L
+            const baseline = m2p(L, 0);
+            ctx.beginPath();
+            ctx.moveTo(baseline.x_px, baseline.y_px);
+            ctx.lineTo(baseline.x_px, baseline.y_px - 1.5 * SCALE);
+            ctx.stroke();
+            ctx.fillText("Vạch L", baseline.x_px - 15, baseline.y_px + 20);
+
+            // Lưới
+            const netTop = m2p(x_luoi, h_luoi);
+            const netBottom = m2p(x_luoi, 0);
+            ctx.beginPath();
+            ctx.moveTo(netTop.x_px, netTop.y_px);
+            ctx.lineTo(netBottom.x_px, netBottom.y_px);
+            ctx.stroke();
+            ctx.fillText("Lưới", netTop.x_px - 10, netTop.y_px - 10);
+        }
+        
+        // Hàm vẽ Quỹ đạo
+        function drawTrajectory(a, b, c, x1_calc) {
+            ctx.beginPath();
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            
+            for (let x = 0; x <= x1_calc + 0.1; x += 0.1) {
+                // Phương trình parabol: y = ax^2 + bx + c
+                const y = a*x*x + b*x + c;
+                const pos = m2p(x, y);
+                if (x === 0) {
+                    ctx.moveTo(pos.x_px, pos.y_px);
+                } else {
+                    ctx.lineTo(pos.x_px, pos.y_px);
+                }
+            }
+            ctx.stroke();
+        }
+
+        // Hàm vẽ các điểm điều khiển (Handles)
+        function drawHandles() {
+            // P0 (Start)
+            const p0_px = m2p(handles.P0.x, handles.P0.y);
+            ctx.fillStyle = 'green';
+            ctx.beginPath();
+            ctx.arc(p0_px.x_px, p0_px.y_px, handleRadius, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // P1 (End / x1)
+            const p1_px = m2p(handles.P1.x, handles.P1.y);
+            ctx.fillStyle = 'red';
+            ctx.beginPath();
+            ctx.arc(p1_px.x_px, p1_px.y_px, handleRadius, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Apex
+            const apex_px = m2p(handles.Apex.x, handles.Apex.y);
+            ctx.fillStyle = 'purple';
+            ctx.beginPath();
+            ctx.arc(apex_px.x_px, apex_px.y_px, handleRadius, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        // === 6. HÀM TÍNH TOÁN (THEO YÊU CẦU) ===
+
+        // Giải hệ 2 PT 2 ẩn để tìm a, b
+        function solveParabola(P0, P1, P_apex) {
+            const H0 = P0.y;
+            const x1 = P1.x;
+            const x_a = P_apex.x;
+            const y_a = P_apex.y;
+
+            // c = H0
+            const c = H0;
+
+            // Giải hệ 2 PT:
+            // (1) a*x1^2 + b*x1 + c = 0
+            // (2) a*x_a^2 + b*x_a + c = y_a
+            
+            // Sắp xếp lại:
+            // (1) a*x1^2 + b*x1 = -H0
+            // (2) a*x_a^2 + b*x_a = y_a - H0
+
+            // Kiểm tra các trường hợp đặc biệt (tránh chia cho 0)
+            if (x1 === 0 || x_a === 0 || x1 === x_a) {
+                return null; // Không thể giải
+            }
+            
+            // Giải bằng phương pháp thế
+            // Từ (1) => b = (-H0 - a*x1^2) / x1
+            const denom = x_a * x1 * (x_a - x1);
+            if (denom === 0) return null;
+
+            const a = (y_a * x1 - H0 * (x1 - x_a)) / denom;
+            const b = (-H0 - a * x1 * x1) / x1;
+
+            // Nếu parabol ngửa lên (a > 0), nó là không thể
+            if (a >= 0) {
+                return null;
+            }
+
+            return { a, b, c };
+        }
+
+        // Từ a, b tính v0 và theta
+        function solvePhysics(a, b) {
+            if (a >= 0) return { v0: NaN, theta: NaN };
+
+            // b = tan(theta)
+            const theta_rad = Math.atan(b);
+            const theta_deg = theta_rad * (180 / Math.PI);
+            
+            // a = -g / (2 * v0^2 * cos^2(theta))
+            const cos2_th = Math.pow(Math.cos(theta_rad), 2);
+            if (cos2_th === 0) return { v0: NaN, theta: NaN };
+
+            const v0 = Math.sqrt(-g / (2 * a * cos2_th));
+
+            return { v0, theta_deg };
+        }
+
+        // === 7. HÀM CẬP NHẬT CHÍNH ===
+        function updateSimulation() {
+            // 1. Giải Parabol
+            const parabola = solveParabola(handles.P0, handles.P1, handles.Apex);
+
+            // 2. Vẽ Sân
+            drawScene();
+
+            if (!parabola) {
+                // Trường hợp lỗi (ví dụ: a > 0 hoặc chia cho 0)
+                statusEl.textContent = "QUỸ ĐẠO KHÔNG THỂ";
+                statusEl.className = "impossible";
+                drawHandles(); // Vẫn vẽ handle
+                return;
+            }
+
+            const { a, b, c } = parabola;
+            
+            // 3. Giải Vật lý
+            const physics = solvePhysics(a, b);
+
+            // 4. Cập nhật các ô Input (Giờ là Output)
+            inputH0.value = handles.P0.y.toFixed(2);
+            inputX1.value = handles.P1.x.toFixed(2);
+            inputV0.value = physics.v0.toFixed(2);
+            inputTheta.value = physics.theta_deg.toFixed(2);
+
+            // 5. Vẽ Quỹ đạo
+            drawTrajectory(a, b, c, handles.P1.x);
+
+            // 6. Kiểm tra Trạng thái (Net, In, Out)
+            const y_luoi = a * x_luoi * x_luoi + b * x_luoi + c;
+            
+            let status = "";
+            let statusClass = "";
+            if (y_luoi <= h_luoi) {
+                status = "ĐÂM LƯỚI";
+                statusClass = "net";
+            } else if (handles.P1.x > L) {
+                status = "RA NGOÀI";
+                statusClass = "out";
+            } else {
+                status = "TRONG SÂN";
+                statusClass = "in";
+            }
+            statusEl.textContent = status;
+            statusEl.className = statusClass;
+            
+            // 7. Vẽ Handles (đè lên trên)
+            drawHandles();
+        }
+
+        // === 8. XỬ LÝ SỰ KIỆN CHUỘT ===
+        
+        function getMousePos(evt) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: evt.clientX - rect.left,
+                y: evt.clientY - rect.top
+            };
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            const mousePos_px = getMousePos(e);
+            
+            // Kiểm tra va chạm với từng handle
+            const p0_px = m2p(handles.P0.x, handles.P0.y);
+            const p1_px = m2p(handles.P1.x, handles.P1.y);
+            const apex_px = m2p(handles.Apex.x, handles.Apex.y);
+
+            if (Math.hypot(mousePos_px.x - p0_px.x_px, mousePos_px.y - p0_px.y_px) < handleRadius) {
+                isDragging = 'P0';
+            } else if (Math.hypot(mousePos_px.x - p1_px.x_px, mousePos_px.y - p1_px.y_px) < handleRadius) {
+                isDragging = 'P1';
+            } else if (Math.hypot(mousePos_px.x - apex_px.x_px, mousePos_px.y - apex_px.y_px) < handleRadius) {
+                isDragging = 'Apex';
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            
+            const mousePos_px = getMousePos(e);
+            const mousePos_m = p2m(mousePos_px.x, mousePos_px.y);
+            
+            // Cập nhật vị trí (mét) của handle đang kéo
+            if (isDragging === 'P0') {
+                handles.P0.y = Math.max(0, mousePos_m.y_m); // Chỉ kéo trục y, không âm
+            } else if (isDragging === 'P1') {
+                handles.P1.x = Math.max(0.1, mousePos_m.x_m); // Chỉ kéo trục x, không âm
+            } else if (isDragging === 'Apex') {
+                handles.Apex.x = Math.max(0.1, mousePos_m.x_m); // Kéo tự do
+                handles.Apex.y = Math.max(0, mousePos_m.y_m);
+            }
+            
+            // Chạy lại toàn bộ mô phỏng
+            updateSimulation();
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDragging = null;
+        });
+
+        // === 9. KÍCH HOẠT MÔ PHỎNG LẦN ĐẦU ===
+        updateSimulation();
+
+    </script>
+</body>
+</html>
